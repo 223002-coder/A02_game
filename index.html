@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>NEON MAZE</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #050510;
+            font-family: 'Orbitron', sans-serif;
+            overflow: hidden;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: none; /* スマホでのスワイプスクロールを防止 */
+        }
+        
+        /* CRTモニター風のスキャンライン・エフェクト */
+        .scanlines::before {
+            content: " ";
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+            bottom: 0;
+            right: 0;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), 
+                        linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            z-index: 10;
+            background-size: 100% 4px, 3px 100%;
+            pointer-events: none;
+        }
+
+        /* キャンバスのグロー効果 */
+        canvas {
+            display: block;
+            box-shadow: 0 0 40px rgba(0, 255, 255, 0.15), inset 0 0 20px rgba(0, 255, 255, 0.1);
+            border-radius: 12px;
+            background-color: #090914;
+            transition: cursor 0.2s;
+        }
+
+        /* プレイ中はマウスカーソルを隠す */
+        .hide-cursor {
+            cursor: none;
+        }
+    </style>
+</head>
+<body class="h-screen w-screen flex flex-col items-center justify-center scanlines relative text-white">
+
+    <!-- UI Overlay (メッセージ表示レイヤー) -->
+    <div id="uiLayer" class="absolute inset-0 flex flex-col items-center justify-center z-20 transition-all duration-500 bg-black/70 backdrop-blur-sm pointer-events-none">
+        <div id="uiMessage" class="text-center flex flex-col items-center pointer-events-auto">
+            <h1 class="text-cyan-400 text-5xl md:text-7xl font-black mb-6 tracking-widest drop-shadow-[0_0_20px_rgba(0,255,255,0.8)]">NEON MAZE</h1>
+            <p class="text-white text-xl md:text-2xl animate-pulse tracking-widest bg-white/10 py-2 px-6 rounded-full border border-white/20">
+                CLICK ANYWHERE TO INITIALIZE
+            </p>
+        </div>
+    </div>
+
+    <!-- ヘッダー情報 -->
+    <div class="absolute top-4 left-0 w-full px-8 flex justify-between items-center z-10 pointer-events-none opacity-50">
+        <div class="text-sm tracking-widest text-cyan-500">SYS_VER: 2.0.4</div>
+        <div class="text-sm tracking-widest text-pink-500 font-bold" id="statusText">AWAITING INPUT</div>
+    </div>
+
+    <!-- ゲーム画面 -->
+    <div class="relative w-full max-w-5xl p-4 flex justify-center z-0">
+        <!-- 内部解像度800x600, CSSでレスポンシブに表示 -->
+        <canvas id="gameCanvas" width="800" height="600" class="w-full aspect-[4/3] max-w-[800px] border border-cyan-500/30"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const uiLayer = document.getElementById('uiLayer');
+        const uiMessage = document.getElementById('uiMessage');
+        const statusText = document.getElementById('statusText');
+
+        // ゲームの状態管理
+        let state = 'WAIT_CLICK'; // WAIT_CLICK, INIT, PLAYING, GAMEOVER, CLEAR
+        let mouseX = -100;
+        let mouseY = -100;
+        let lastMouseX = -100;
+        let lastMouseY = -100;
+        let shakeTime = 0;
+        let timeElapsed = 0;
+        let canRetry = false;
+
+        // エフェクト用配列
+        let particles = [];
+        let trails = [];
+
+        // オーディオ設定 (Tone.js)
+        let synth, noise, clearSynth;
+
+        function initAudio() {
+            // シンセサイザーの初期化
+            synth = new Tone.PolySynth(Tone.Synth, {
+                oscillator: { type: "sawtooth" },
+                envelope: { attack: 0.01, decay: 0.1, sustain: 0.1, release: 1 }
+            }).toDestination();
+            synth.volume.value = -12;
+
+            // 爆発音用ノイズ
+            noise = new Tone.NoiseSynth({
+                noise: { type: "pink" },
+                envelope: { attack: 0.01, decay: 0.8, sustain: 0, release: 0.1 }
+            }).toDestination();
+            noise.volume.value = -5;
+            
+            // クリア音用
+            clearSynth = new Tone.PolySynth(Tone.Synth, {
+                oscillator: { type: "triangle" },
+                envelope: { attack: 0.05, decay: 0.2, sustain: 0.5, release: 1.5 }
+            }).toDestination();
+            clearSynth.volume.value = -8;
+        }
+
+        // --- 迷路の設計 ---
+        // 迷路の経路ポイント (Start to Goal)
+        const pathPoints = [
+            {x: 80, y: 80},     // Start
+            {x: 720, y: 80},
+            {x: 720, y: 180},
+            {x: 180, y: 180},
+            {x: 180, y: 320},
+            {x: 350, y: 320},   // 難所: ギザギザ
+            {x: 350, y: 240},
+            {x: 450, y: 240},
+            {x: 450, y: 320},
+            {x: 650, y: 320},
+            {x: 650, y: 450},
+            {x: 80, y: 450},
+            {x: 80, y: 530},
+            {x: 720, y: 530}    // Goal
+        ];
+
+        // 経路からPath2Dオブジェクトを生成
+        const mazePath = new Path2D();
+        mazePath.moveTo(pathPoints[0].x, pathPoints[0].y);
+        for (let i = 1; i < pathPoints.length; i++) {
+            mazePath.lineTo(pathPoints[i].x, pathPoints[i].y);
+        }
+
+        const LINE_WIDTH = 40; // 安全な道の幅 (狭いほど高難易度)
+
+        // --- イベントリスナー ---
+        
+        // 全体のマウスクリック/タッチ開始
+        function handleInteraction() {
+            if (state === 'WAIT_CLICK') {
+                Tone.start();
+                initAudio();
+                state = 'INIT';
+                showUI("SYSTEM ONLINE", "<span class='text-green-400'>HOVER ON GREEN START POINT</span><br><span class='text-sm text-gray-400'>DO NOT TOUCH THE NEON WALLS</span>", false);
+                statusText.innerText = "STANDBY";
+                statusText.className = "text-sm tracking-widest text-green-500 font-bold";
+            } else if ((state === 'GAMEOVER' || state === 'CLEAR') && canRetry) {
+                resetGame();
+            }
+        }
+        window.addEventListener('mousedown', handleInteraction);
+        window.addEventListener('touchstart', handleInteraction);
+
+        // マウス・タッチの座標更新
+        function updateMousePos(clientX, clientY) {
+            const rect = canvas.getBoundingClientRect();
+            // CSSによるリサイズスケールを計算して内部座標に変換
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            mouseX = (clientX - rect.left) * scaleX;
+            mouseY = (clientY - rect.top) * scaleY;
+        }
+
+        canvas.addEventListener('mousemove', (e) => updateMousePos(e.clientX, e.clientY));
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault(); // スクロール防止
+            updateMousePos(e.touches[0].clientX, e.touches[0].clientY);
+        }, { passive: false });
+
+        // キャンバスの外に出たらゲームオーバー (ズル防止)
+        canvas.addEventListener('mouseleave', () => {
+            if (state === 'PLAYING') gameOver();
+        });
+        canvas.addEventListener('touchend', () => {
+            if (state === 'PLAYING') gameOver(); // タッチを離してもアウト
+        });
+
+        // --- ゲームロジック ---
+
+        function resetGame() {
+            state = 'INIT';
+            particles = [];
+            trails = [];
+            showUI("", "", false);
+            statusText.innerText = "STANDBY";
+            statusText.className = "text-sm tracking-widest text-green-500 font-bold";
+            canvas.classList.remove('hide-cursor');
+        }
+
+        function startPlaying() {
+            state = 'PLAYING';
+            synth.triggerAttackRelease(["C5", "E5", "G5"], "8n");
+            showUI("", "", false); // UIを隠す
+            statusText.innerText = "HACKING IN PROGRESS...";
+            statusText.className = "text-sm tracking-widest text-cyan-500 font-bold animate-pulse";
+            canvas.classList.add('hide-cursor');
+            lastMouseX = mouseX;
+            lastMouseY = mouseY;
+        }
+
+        function gameOver() {
+            if (state === 'GAMEOVER') return;
+            state = 'GAMEOVER';
+            shakeTime = 25;
+            canRetry = false;
+            
+            // サウンド再生
+            if (noise) noise.triggerAttackRelease("4n");
+            if (synth) synth.triggerAttackRelease(["C2", "C1"], "4n");
+            
+            createExplosion(mouseX, mouseY, '#ff0055');
+            
+            showUI(
+                "<div class='text-red-500 text-5xl md:text-7xl font-black drop-shadow-[0_0_20px_rgba(255,0,0,1)]'>SYSTEM FAILURE</div>", 
+                "<div class='text-white text-xl md:text-2xl mt-6 px-6 py-2 bg-red-900/40 border border-red-500 rounded cursor-pointer hover:bg-red-900/80 transition-colors animate-pulse'>CLICK TO REBOOT</div>", 
+                true
+            );
+            
+            statusText.innerText = "CRITICAL ERROR";
+            statusText.className = "text-sm tracking-widest text-red-500 font-bold";
+            canvas.classList.remove('hide-cursor');
+            
+            // 1秒後にリトライ許可
+            setTimeout(() => { canRetry = true; }, 1000);
+        }
+
+        function gameClear() {
+            if (state === 'CLEAR') return;
+            state = 'CLEAR';
+            canRetry = false;
+            
+            if (clearSynth) clearSynth.triggerAttackRelease(["C4", "E4", "G4", "C5"], "1n");
+            
+            createFireworks();
+            
+            showUI(
+                "<div class='text-yellow-400 text-5xl md:text-7xl font-black drop-shadow-[0_0_20px_rgba(255,255,0,1)]'>ACCESS GRANTED</div>", 
+                "<div class='text-white text-xl md:text-2xl mt-6 px-6 py-2 bg-yellow-900/40 border border-yellow-500 rounded cursor-pointer hover:bg-yellow-900/80 transition-colors animate-pulse'>PLAY AGAIN</div>", 
+                true
+            );
+            
+            statusText.innerText = "MISSION ACCOMPLISHED";
+            statusText.className = "text-sm tracking-widest text-yellow-500 font-bold";
+            canvas.classList.remove('hide-cursor');
+
+            setTimeout(() => { canRetry = true; }, 1000);
+        }
+
+        // 高速マウス移動による壁抜け（トンネリング）を防ぐため、線分上で当たり判定を行う
+        function checkLineCollision(x1, y1, x2, y2) {
+            const dist = Math.hypot(x2 - x1, y2 - y1);
+            const steps = Math.max(1, Math.ceil(dist / 5)); // 5px刻みで安全確認
+            
+            ctx.lineWidth = LINE_WIDTH;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            
+            for (let i = 0; i <= steps; i++) {
+                const t = i / steps;
+                const cx = x1 + (x2 - x1) * t;
+                const cy = y1 + (y2 - y1) * t;
+                // isPointInStrokeで現在の点(cx, cy)が描画されたストローク（道）の上にあるか判定
+                if (!ctx.isPointInStroke(mazePath, cx, cy)) {
+                    // 当たった地点を保存（爆発エフェクト用）
+                    mouseX = cx; mouseY = cy;
+                    return false; 
+                }
+            }
+            return true;
+        }
+
+        // --- 描画関数 ---
+
+        function showUI(title, subtitle, showBg) {
+            if (!title) {
+                uiLayer.classList.add('opacity-0');
+                return;
+            }
+            uiLayer.classList.remove('opacity-0');
+            
+            if (showBg) uiLayer.classList.add('bg-black/80');
+            else uiLayer.classList.remove('bg-black/80');
+            
+            uiMessage.innerHTML = `<div class="mb-4">${title}</div><div>${subtitle}</div>`;
+        }
+
+        function drawMaze() {
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            // 1. ネオンの壁（外側のアウトライン）
+            ctx.lineWidth = LINE_WIDTH + 16; 
+            ctx.strokeStyle = '#0ff'; // シアン色
+            ctx.shadowBlur = 25;
+            ctx.shadowColor = '#0ff';
+            ctx.stroke(mazePath);
+            
+            // 少し白みを足して光の芯を作る
+            ctx.lineWidth = LINE_WIDTH + 6; 
+            ctx.strokeStyle = '#fff';
+            ctx.shadowBlur = 10;
+            ctx.stroke(mazePath);
+
+            // 2. 道（内側の安全地帯。背景色で塗りつぶして「溝」を作る）
+            ctx.lineWidth = LINE_WIDTH;
+            ctx.strokeStyle = '#090914';
+            ctx.shadowBlur = 0;
+            ctx.stroke(mazePath);
+            
+            // 3. 道の中央にうっすらガイドライン
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = 'rgba(0, 255, 255, 0.1)';
+            ctx.stroke(mazePath);
+        }
+
+        function drawAreas() {
+            // Start Area (緑)
+            const startX = pathPoints[0].x;
+            const startY = pathPoints[0].y;
+            ctx.beginPath();
+            ctx.arc(startX, startY, LINE_WIDTH/2 - 2, 0, Math.PI*2);
+            ctx.fillStyle = state === 'INIT' ? `rgba(0, 255, 0, ${0.4 + Math.sin(timeElapsed*0.1)*0.4})` : 'rgba(0, 255, 0, 0.1)';
+            ctx.fill();
+            ctx.strokeStyle = '#0f0';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Goal Area (黄)
+            const goalX = pathPoints[pathPoints.length-1].x;
+            const goalY = pathPoints[pathPoints.length-1].y;
+            ctx.beginPath();
+            ctx.arc(goalX, goalY, LINE_WIDTH/2 - 2, 0, Math.PI*2);
+            ctx.fillStyle = state === 'PLAYING' ? `rgba(255, 255, 0, ${0.4 + Math.sin(timeElapsed*0.1)*0.4})` : 'rgba(255, 255, 0, 0.1)';
+            ctx.fill();
+            ctx.strokeStyle = '#ff0';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        // --- パーティクルクラス ---
+
+        class Particle {
+            constructor(x, y, color, speed, life) {
+                this.x = x;
+                this.y = y;
+                const angle = Math.random() * Math.PI * 2;
+                this.vx = Math.cos(angle) * speed;
+                this.vy = Math.sin(angle) * speed;
+                this.color = color;
+                this.life = life;
+                this.maxLife = life;
+                this.size = Math.random() * 3 + 1;
+            }
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.vx *= 0.94; // 摩擦
+                this.vy *= 0.94;
+                this.life--;
+            }
+            draw(ctx) {
+                ctx.globalAlpha = Math.max(0, this.life / this.maxLife);
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1.0;
+            }
+        }
+
+        // プレイヤーの移動軌跡
+        class Trail {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.life = 15;
+                this.maxLife = 15;
+            }
+            update() { this.life--; }
+            draw(ctx) {
+                ctx.globalAlpha = Math.max(0, this.life / this.maxLife);
+                ctx.fillStyle = '#fff';
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = '#0ff';
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, 2, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+                ctx.globalAlpha = 1.0;
+            }
+        }
+
+        function createExplosion(x, y, color) {
+            for (let i = 0; i < 60; i++) {
+                particles.push(new Particle(x, y, color, Math.random() * 12, 30 + Math.random() * 40));
+            }
+        }
+
+        function createFireworks() {
+            const gx = pathPoints[pathPoints.length-1].x;
+            const gy = pathPoints[pathPoints.length-1].y;
+            for (let i = 0; i < 150; i++) {
+                const color = `hsl(${Math.random() * 60 + 40}, 100%, 60%)`; // 黄色〜オレンジ系
+                particles.push(new Particle(gx, gy, color, Math.random() * 15, 60 + Math.random() * 60));
+            }
+        }
+
+        // --- メインループ ---
+
+        function loop() {
+            timeElapsed++;
+
+            // 背景クリア
+            ctx.fillStyle = '#090914';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.save();
+            
+            // 画面揺れエフェクト
+            if (shakeTime > 0) {
+                const dx = (Math.random() - 0.5) * 15;
+                const dy = (Math.random() - 0.5) * 15;
+                ctx.translate(dx, dy);
+                shakeTime--;
+            }
+
+            drawMaze();
+            drawAreas();
+
+            // 状態によるロジック
+            if (state === 'INIT') {
+                // スタート地点に入ったか判定
+                const dist = Math.hypot(mouseX - pathPoints[0].x, mouseY - pathPoints[0].y);
+                if (dist < LINE_WIDTH / 2) {
+                    startPlaying();
+                }
+            } else if (state === 'PLAYING') {
+                // 軌跡生成
+                if (timeElapsed % 2 === 0) trails.push(new Trail(mouseX, mouseY));
+
+                // 当たり判定 (高速移動対策込み)
+                if (lastMouseX !== -100 && lastMouseY !== -100) {
+                    const isSafe = checkLineCollision(lastMouseX, lastMouseY, mouseX, mouseY);
+                    if (!isSafe) {
+                        gameOver();
+                    } else {
+                        // ゴール判定
+                        const goalX = pathPoints[pathPoints.length-1].x;
+                        const goalY = pathPoints[pathPoints.length-1].y;
+                        const goalDist = Math.hypot(mouseX - goalX, mouseY - goalY);
+                        if (goalDist < LINE_WIDTH / 2) {
+                            gameClear();
+                        }
+                    }
+                }
+
+                // プレイヤーの位置を描画 (光る玉)
+                if (state === 'PLAYING') {
+                    ctx.beginPath();
+                    ctx.arc(mouseX, mouseY, 5, 0, Math.PI*2);
+                    ctx.fillStyle = '#fff';
+                    ctx.shadowBlur = 15;
+                    ctx.shadowColor = '#fff';
+                    ctx.fill();
+                    
+                    // コア
+                    ctx.beginPath();
+                    ctx.arc(mouseX, mouseY, 2, 0, Math.PI*2);
+                    ctx.fillStyle = '#0ff';
+                    ctx.fill();
+                    ctx.shadowBlur = 0;
+                }
+            }
+            
+            // 座標更新
+            if (state === 'PLAYING') {
+                lastMouseX = mouseX;
+                lastMouseY = mouseY;
+            }
+
+            // パーティクル・軌跡の更新と描画
+            for (let i = trails.length - 1; i >= 0; i--) {
+                trails[i].update();
+                trails[i].draw(ctx);
+                if (trails[i].life <= 0) trails.splice(i, 1);
+            }
+            for (let i = particles.length - 1; i >= 0; i--) {
+                particles[i].update();
+                particles[i].draw(ctx);
+                if (particles[i].life <= 0) particles.splice(i, 1);
+            }
+
+            ctx.restore();
+            requestAnimationFrame(loop);
+        }
+
+        // ループ開始
+        requestAnimationFrame(loop);
+
+    </script>
+</body>
+</html>
