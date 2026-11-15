@@ -178,6 +178,10 @@
         }
 
         canvas.addEventListener('mousemove', (e) => updateMousePos(e.clientX, e.clientY));
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            updateMousePos(e.touches[0].clientX, e.touches[0].clientY);
+        }, { passive: false });
         canvas.addEventListener('touchmove', (e) => {
             e.preventDefault(); // スクロール防止
             updateMousePos(e.touches[0].clientX, e.touches[0].clientY);
